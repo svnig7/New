@@ -13,8 +13,11 @@
 
     {% if is_video %}
     <div class="fused-player" id="player">
-      <video preload="metadata" playsinline {% if poster %}poster="{{ poster }}"{% endif %} src="{{ stream_url }}"></video>
+      <video preload="metadata" playsinline {% if poster %}poster="{{ poster }}"{% endif %} src="{{ video_src }}"></video>
     </div>
+    {% if remux_needed %}
+    <div class="meta">Converting container for browser playback &mdash; seeking may restart playback. Use Download or VLC/MX Player for the original file with full seeking.</div>
+    {% endif %}
     {% elif is_audio %}
     <audio controls preload="metadata" src="{{ stream_url }}" style="width:100%"></audio>
     {% else %}
