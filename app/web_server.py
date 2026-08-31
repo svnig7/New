@@ -13,11 +13,22 @@ from .client_manager import client_manager
 from .config import Config
 from .media_store import media_store
 from .playlist_store import playlist_store
+from .remux import remux_to_mp4
 from .subtitle_utils import ass_to_vtt, srt_to_vtt
 from .token_utils import TYPE_FILE, TYPE_PLAYLIST, TYPE_SUB, decode_token, encode_token
 
 logger = logging.getLogger(__name__)
 routes = web.RouteTableDef()
+
+# Containers Chrome/most browsers won't play natively in a <video> tag,
+# even when the codecs inside (H.264/AAC) are otherwise fine. These get
+# routed through /remux instead of /stream for inline playback.
+REMUX_MIMES = {"video/x-matroska", "video/x-msvideo", "video/x-flv"}
+REMUX_EXTS = (".mkv", ".avi", ".flv")
+
+
+def _needs_remux(mime: str, name: str) -> bool:
+    return mime in REMUX_MIMES or name.lower().endswith(REMUX_EXTS)
 
 _env = Environment(
     loader=FileSystemLoader(os.path.join(os.path.dirname(__file__), "templates"))
@@ -96,15 +107,20 @@ async def watch(request: web.Request):
         for s in meta.get("subs", [])
     ]
 
+    remux_needed = mime.startswith("video/") and _needs_remux(mime, name)
+    video_src = f"{Config.BASE_URL}/remux/{token}" if remux_needed else f"{Config.BASE_URL}/stream/{token}"
+
     html = _watch_template.render(
         name=name,
         size=size,
         mime=mime,
+        video_src=video_src,
         stream_url=f"{Config.BASE_URL}/stream/{token}",
         dl_url=f"{Config.BASE_URL}/dl/{token}",
         poster=meta.get("thumb") or "",
         is_video=mime.startswith("video/"),
         is_audio=mime.startswith("audio/"),
+        remux_needed=remux_needed,
         tracks_json=json.dumps({"audio": audio_tracks, "subs": sub_tracks}),
     )
     return web.Response(text=html, content_type="text/html")
@@ -171,6 +187,56 @@ async def subs_endpoint(request: web.Request):
     return web.Response(text=vtt, content_type="text/vtt")
 
 
+@routes.get("/remux/{token}")
+async def remux_endpoint(request: web.Request):
+    token = request.match_info["token"]
+    resolved = await _resolve_file(token)
+    if not resolved:
+        raise web.HTTPNotFound(text="Link expired or invalid.")
+    msg, media, _ = resolved
+    name, size, _ = _file_meta(media)
+
+    pooled = await client_manager.acquire()
+    gen = remux_to_mp4(pooled.client, msg, size)
+
+    try:
+        first_chunk = await gen.__anext__()
+    except StopAsyncIteration:
+        first_chunk = b""
+    except Exception:
+        client_manager.release(pooled)
+        logger.exception("remux failed for message %s", msg.id)
+        raise web.HTTPBadGateway(
+            text="Couldn't convert this file for playback. Make sure "
+            "ffmpeg is installed in the container."
+        )
+
+    headers = {
+        "Content-Type": "video/mp4",
+        "Content-Disposition": f'inline; filename="{os.path.splitext(name)[0]}.mp4"',
+    }
+    resp = web.StreamResponse(status=200, headers=headers)
+    try:
+        await resp.prepare(request)
+    except (ConnectionResetError, asyncio.CancelledError, ConnectionError):
+        client_manager.release(pooled)
+        return resp
+
+    try:
+        if first_chunk:
+            await resp.write(first_chunk)
+        async for chunk in gen:
+            await resp.write(chunk)
+    except (ConnectionResetError, asyncio.CancelledError):
+        pass
+    except Exception:
+        logger.exception("remux streaming interrupted for message %s", msg.id)
+    finally:
+        client_manager.release(pooled)
+
+    return resp
+
+
 async def _serve(request: web.Request, force_download: bool):
     token = request.match_info["token"]
     resolved = await _resolve_file(token)
@@ -225,7 +291,13 @@ async def _serve(request: web.Request, force_download: bool):
         headers["Content-Range"] = f"bytes {start}-{end}/{size}"
 
     resp = web.StreamResponse(status=status, headers=headers)
-    await resp.prepare(request)
+    try:
+        await resp.prepare(request)
+    except (ConnectionResetError, asyncio.CancelledError, ConnectionError):
+        # Client (often Chrome's download hand-off) closed the connection
+        # before we could even send headers -- nothing more to do.
+        client_manager.release(pooled)
+        return resp
 
     try:
         if first_chunk:
