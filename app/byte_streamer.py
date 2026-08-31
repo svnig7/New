@@ -44,8 +44,8 @@ async def stream_chunks(
                     sent += len(chunk)
                 if sent >= length or not chunk:
                     break
-        except Exception as e:
-            logger.error("stream producer error: %s", e)
+        except Exception:
+            logger.exception("stream producer failed for message %s", message.id)
         finally:
             await queue.put(sentinel)
 

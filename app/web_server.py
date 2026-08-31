@@ -195,6 +195,26 @@ async def _serve(request: web.Request, force_download: bool):
     end = min(end, size - 1) if size else end
     length = max(end - start + 1, 0)
 
+    pooled = await client_manager.acquire()
+    gen = stream_chunks(pooled.client, msg, start, length)
+
+    # Pull the first chunk BEFORE sending any headers. If Telegram fetch
+    # fails, this lets us return a real error instead of committing a
+    # 200/206 response with a Content-Length promise we can't keep --
+    # which is what produces a "downloads but is 0 bytes / broken" file.
+    try:
+        first_chunk = await gen.__anext__()
+    except StopAsyncIteration:
+        first_chunk = b""
+    except Exception:
+        client_manager.release(pooled)
+        logger.exception("initial fetch failed for message %s", msg.id)
+        raise web.HTTPBadGateway(
+            text="Couldn't fetch this file from Telegram. Make sure the "
+            "bot (and every STREAM_TOKENS worker) is still an admin of "
+            "LOG_CHANNEL, and check the server logs for details."
+        )
+
     headers = {
         "Content-Type": mime,
         "Accept-Ranges": "bytes",
@@ -207,12 +227,15 @@ async def _serve(request: web.Request, force_download: bool):
     resp = web.StreamResponse(status=status, headers=headers)
     await resp.prepare(request)
 
-    pooled = await client_manager.acquire()
     try:
-        async for chunk in stream_chunks(pooled.client, msg, start, length):
+        if first_chunk:
+            await resp.write(first_chunk)
+        async for chunk in gen:
             await resp.write(chunk)
     except (ConnectionResetError, asyncio.CancelledError):
         pass
+    except Exception:
+        logger.exception("streaming interrupted for message %s", msg.id)
     finally:
         client_manager.release(pooled)
 
