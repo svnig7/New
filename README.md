@@ -44,6 +44,23 @@ transcode; it doesn't require re-encoding the file. Subtitle files are
 converted to WebVTT on the fly (`.srt` cleanly; `.ass` best-effort —
 positioning/karaoke/styling aren't preserved, only text and timing).
 
+### Playing MKV/AVI/FLV in the browser
+
+Chrome (and most browsers) can't parse Matroska/AVI/FLV containers
+natively in a `<video>` tag, even when the codecs inside are otherwise
+fine. For these, the watch page's player pulls from `/remux/<token>`
+instead of `/stream/<token>`: the byte stream is piped through
+`ffmpeg -c copy` (repackaging only, no re-encoding — cheap) into
+fragmented MP4 on the fly. Download / VLC / MX Player still get the
+original, untouched file via `/dl` and `/stream`, which already support
+these containers natively.
+
+Limitation: because ffmpeg consumes the source sequentially, remuxed
+playback doesn't support seeking — dragging the progress bar restarts
+from the beginning. Real seeking would need segment-based HLS or a
+WASM demuxer feeding Media Source Extensions (what WZML-X does with
+`@libmedia/avplayer`); this is the simpler, cheaper version of that.
+
 ## How it works
 
 1. `/stream` copies the target message into a private `LOG_CHANNEL` (so
@@ -82,6 +99,14 @@ positioning/karaoke/styling aren't preserved, only text and timing).
 - The web server binds `0.0.0.0:$PORT`, which all three platforms expect.
 - If the platform gives you a persistent volume, mount it at `/app/data`
   so playlists and track metadata survive redeploys.
+- On Render's **free tier**, the service spins down after inactivity. The
+  first request after a cold start has to both boot the process and do a
+  fresh MTProto handshake with Telegram's media DC (~1-2s), which can be
+  slow enough that a browser's download hand-off gives up and resets the
+  connection before headers arrive. If a download looks "broken" only on
+  the *first* request after idling, that's why — try again immediately
+  after (the service is warm by then), or move off the free tier if this
+  needs to be reliable.
 
 ## Tuning notes
 
