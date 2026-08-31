@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ name }}</title>
+{% if poster %}<meta property="og:image" content="{{ poster }}">{% endif %}
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="card">
+    <h1>{{ name }}</h1>
+
+    {% if is_video %}
+    <div class="fused-player" id="player">
+      <video preload="metadata" playsinline {% if poster %}poster="{{ poster }}"{% endif %} src="{{ stream_url }}"></video>
+    </div>
+    {% elif is_audio %}
+    <audio controls preload="metadata" src="{{ stream_url }}" style="width:100%"></audio>
+    {% else %}
+    <p>Preview isn't available for this file type &mdash; use Download below.</p>
+    {% endif %}
+
+    <div class="meta">{{ (size / 1048576) | round(1) }} MB &middot; {{ mime }}</div>
+
+    <div class="actions">
+      <a class="btn btn-primary" href="{{ dl_url }}">Download</a>
+      <a class="btn btn-secondary" href="vlc://{{ stream_url }}">Open in VLC</a>
+      <a class="btn btn-secondary"
+         href="intent:{{ stream_url }}#Intent;package=com.mxtech.videoplayer.ad;S.title={{ name }};end">
+        Open in MX Player
+      </a>
+    </div>
+  </div>
+
+  {% if is_video %}
+  <script src="/static/player.js"></script>
+  <script>
+    new FusedPlayer(document.getElementById("player"), {{ tracks_json | safe }});
+  </script>
+  {% endif %}
+</body>
+</html>
